@@ -27,7 +27,6 @@ export function ConnectionPath({
     const dx = Math.abs(endX - startX);
     const curvature = Math.max(dx * 0.5, 50);
     const pathD = `M ${startX} ${startY} C ${startX + curvature} ${startY}, ${endX - curvature} ${endY}, ${endX} ${endY}`;
-
     return (
         <g>
             <path

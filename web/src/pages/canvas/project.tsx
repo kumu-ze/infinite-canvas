@@ -602,7 +602,7 @@ function InfiniteCanvasPage() {
             setConnections((prev) => [...prev, { id: nanoid(), ...connection }]);
             setSelectedNodeIds(new Set([newNode.id]));
             setSelectedConnectionId(null);
-            if (type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group) setDialogNodeId(newNode.id);
+            if (type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio) setDialogNodeId(newNode.id);
             setPendingConnectionCreate(null);
             setConnecting(null);
         },
@@ -665,6 +665,20 @@ function InfiniteCanvasPage() {
     }, [collapsingBatchIds, nodes, size.height, size.width, viewport.k, viewport.x, viewport.y]);
 
     const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+    // Hero-style upstream prompt summary: show connected text on the target image card,
+    // not on the Bézier connection itself.
+    const linkedPromptTextsByNodeId = useMemo(() => {
+        const result = new Map<string, string[]>();
+        connections.forEach((connection) => {
+            const from = nodeById.get(connection.fromNodeId);
+            const to = nodeById.get(connection.toNodeId);
+            if (!from || !to || from.type !== CanvasNodeType.Text || to.type !== CanvasNodeType.Image) return;
+            const text = (from.metadata?.content || from.title || "").trim();
+            if (!text) return;
+            result.set(to.id, [...(result.get(to.id) || []), text]);
+        });
+        return result;
+    }, [connections, nodeById]);
     const toolbarNode = toolbarNodeId ? nodeById.get(toolbarNodeId) || null : null;
     const infoNode = infoNodeId ? nodeById.get(infoNodeId) || null : null;
     const cropNode = cropNodeId ? nodeById.get(cropNodeId) || null : null;
@@ -724,7 +738,7 @@ function InfiniteCanvasPage() {
     const configInputsById = useMemo(() => {
         const map = new Map<string, NodeGenerationInput[]>();
         nodes.forEach((node) => {
-            if (node.type !== CanvasNodeType.Config) return;
+            if (node.type !== CanvasNodeType.Config && node.type !== CanvasNodeType.Image) return;
             map.set(node.id, buildNodeGenerationInputs(node.id, nodes, connections));
         });
         return map;
@@ -737,6 +751,32 @@ function InfiniteCanvasPage() {
         nodes.forEach((node) => map.set(node.id, buildNodeMentionReferences(node, nodes, connections)));
         return map;
     }, [connections, nodes]);
+    useEffect(() => {
+        setNodes((prev) => {
+            let changed = false;
+            const next = prev.map((node) => {
+                if (node.type !== CanvasNodeType.Config) return node;
+                const inputs = buildNodeGenerationInputs(node.id, prev, connections);
+                const desiredIds = inputs.map((input) => input.nodeId);
+                const content = node.metadata?.composerContent || "";
+                const tokens = Array.from(content.matchAll(/@\[node:([^\]]+)\]/g)).map((match) => match[1]);
+                const existingAutoIds = node.metadata?.autoComposerNodeIds || [];
+                // Preserve handwritten text and manually-added references. Only remove tokens
+                // previously inserted by this connection synchronizer.
+                let body = content;
+                existingAutoIds.forEach((id) => { body = body.replaceAll(`@[node:${id}]`, ""); });
+                body = body.replace(/[ \t]+\n/g, "\n").replace(/^\s+/, "");
+                const manualIds = new Set(Array.from(body.matchAll(/@\[node:([^\]]+)\]/g)).map((match) => match[1]));
+                const autoIds = desiredIds.filter((id) => !manualIds.has(id));
+                const prefix = autoIds.map((id) => `@[node:${id}]`).join(" ");
+                const nextContent = [prefix, body.trimStart()].filter(Boolean).join(body.trim() ? "\n" : "");
+                if (nextContent === content && JSON.stringify(autoIds) === JSON.stringify(existingAutoIds)) return node;
+                changed = true;
+                return { ...node, metadata: { ...node.metadata, composerContent: nextContent, autoComposerNodeIds: autoIds } };
+            });
+            return changed ? next : prev;
+        });
+    }, [connections]);
     const agentSnapshot = useMemo<CanvasAgentSnapshot>(
         () => ({ projectId, title: currentProject?.title || "未命名画布", nodes, connections, selectedNodeIds: Array.from(selectedNodeIds), viewport }),
         [connections, currentProject?.title, nodes, projectId, selectedNodeIds, viewport],
@@ -811,6 +851,22 @@ function InfiniteCanvasPage() {
         },
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
     );
+
+    const groupSelectedNodes = useCallback(() => {
+        const selected = nodesRef.current.filter((node) => selectedNodeIdsRef.current.has(node.id) && node.type !== CanvasNodeType.Group);
+        if (selected.length < 2) {
+            createNode(CanvasNodeType.Group);
+            return;
+        }
+        const minX = Math.min(...selected.map((node) => node.position.x));
+        const minY = Math.min(...selected.map((node) => node.position.y));
+        const group = createCanvasNode(CanvasNodeType.Group, { x: minX - 24, y: minY - 52 });
+        group.title = `智能分组（${selected.length} 个节点）`;
+        const memberIds = new Set(selected.map((node) => node.id));
+        setNodes((prev) => arrangeGroupMembers([...prev.map((node) => memberIds.has(node.id) ? { ...node, metadata: { ...node.metadata, groupId: group.id } } : node), group], group.id));
+        setSelectedNodeIds(new Set([group.id]));
+        setSelectedConnectionId(null);
+    }, [createNode]);
 
     const deleteNodes = useCallback(
         (ids: Set<string>) => {
@@ -1165,6 +1221,13 @@ function InfiniteCanvasPage() {
                 });
                 const targetGroup = findGroupDropTarget(movedIds, moved);
                 if (targetGroup) return snapNodesIntoGroup(movedIds, moved, targetGroup);
+                // Hero-style overlap grouping: dropping one ordinary node onto another
+                // creates a smart group immediately, then auto-sizes/reflows it.
+                if (movedIds.size === 1) {
+                    const dragged = moved.find((node) => movedIds.has(node.id) && node.type !== CanvasNodeType.Group);
+                    const overlapTarget = dragged ? findOverlapGroupPeer(dragged, movedIds, moved) : null;
+                    if (dragged && overlapTarget) return createOverlapGroup(moved, dragged, overlapTarget);
+                }
                 return moved.map((node) => {
                     if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
                     const groupId = findContainingGroupId(node, moved);
@@ -1204,7 +1267,10 @@ function InfiniteCanvasPage() {
                     const initial = initialPositions.find((item) => item.id === node.id);
                     return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
                 });
-                setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
+                const existingGroupTarget = findGroupDropTarget(movedIds, previewNodes);
+                const draggedPreview = movedIds.size === 1 ? previewNodes.find((node) => movedIds.has(node.id) && node.type !== CanvasNodeType.Group) : null;
+                const peerTarget = draggedPreview && !existingGroupTarget ? findOverlapGroupPeer(draggedPreview, movedIds, previewNodes) : null;
+                setDropTargetGroupId(existingGroupTarget?.id || peerTarget?.id || null);
 
                 if (rafRef.current) cancelAnimationFrame(rafRef.current);
                 rafRef.current = requestAnimationFrame(() => {
@@ -1591,6 +1657,37 @@ function InfiniteCanvasPage() {
         if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
         saveAs(node.metadata.content, `canvas-${node.type}-${node.id}.${node.type === CanvasNodeType.Video ? "mp4" : node.type === CanvasNodeType.Audio ? audioExtension(node.metadata.mimeType) : imageExtension(node.metadata.content)}`);
     }, []);
+
+    const copyNodeImage = useCallback(
+        async (node: CanvasNodeData) => {
+            if (node.type !== CanvasNodeType.Image || !node.metadata?.content) {
+                message.warning("图片节点为空，无法复制");
+                return;
+            }
+            try {
+                const imageUrl = await resolveImageUrl(node.metadata.storageKey, node.metadata.content);
+                const sourceBlob = await fetch(imageUrl).then((response) => {
+                    if (!response.ok) throw new Error(`读取图片失败 (${response.status})`);
+                    return response.blob();
+                });
+                const blob = sourceBlob.type === "image/png" ? sourceBlob : await convertImageBlobToPng(sourceBlob);
+                if (window.isSecureContext && navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+                    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+                    message.success("图片已复制到剪贴板");
+                    return;
+                }
+                if (await copyImageBlobWithSelection(blob)) {
+                    message.success("图片已复制到剪贴板（兼容模式）");
+                    return;
+                }
+                throw new Error("当前浏览器不允许在 HTTP 页面复制图片，请改用 HTTPS 访问");
+            } catch (error) {
+                const reason = error instanceof Error ? error.message : "浏览器拒绝了剪贴板访问";
+                message.error(`复制图片失败：${reason}`);
+            }
+        },
+        [message],
+    );
 
     const saveNodeAsset = useCallback(
         async (node: CanvasNodeData) => {
@@ -2599,6 +2696,7 @@ function InfiniteCanvasPage() {
                             batchMotion={batchMotionById.get(node.id)}
                             showImageInfo={showImageInfo}
                             resourceLabel={resourceReferenceByNodeId.get(node.id)}
+                            linkedPromptTexts={linkedPromptTextsByNodeId.get(node.id) || []}
                             mentionReferences={mentionReferencesByNodeId.get(node.id) || []}
                             renderPanel={(panelNode) =>
                                 panelNode.type === CanvasNodeType.Config ? (
@@ -2613,6 +2711,7 @@ function InfiniteCanvasPage() {
                                         node={panelNode}
                                         isRunning={runningNodeId === panelNode.id}
                                         mentionReferences={mentionReferencesByNodeId.get(panelNode.id) || []}
+                                        linkedInputs={configInputsById.get(panelNode.id) || []}
                                         onPromptChange={handleNodePromptChange}
                                         onConfigChange={handleConfigNodeChange}
                                         onGenerate={handleGenerateNode}
@@ -2701,6 +2800,7 @@ function InfiniteCanvasPage() {
                     onToggleDialog={(node) => setDialogNodeId((current) => (current === node.id ? null : node.id))}
                     onGenerateImage={generateImageFromTextNode}
                     onUpload={(node) => handleUploadRequest(node.id)}
+                    onCopyImage={(node) => void copyNodeImage(node)}
                     onDownload={downloadNodeImage}
                     onSaveAsset={(node) => void saveNodeAsset(node)}
                     onMaskEdit={(node) => setMaskEditNodeId(node.id)}
@@ -2727,7 +2827,7 @@ function InfiniteCanvasPage() {
                     onAddAudio={() => createNode(CanvasNodeType.Audio)}
                     onAddText={() => createNode(CanvasNodeType.Text)}
                     onAddConfig={() => createNode(CanvasNodeType.Config)}
-                    onAddGroup={() => createNode(CanvasNodeType.Group)}
+                    onAddGroup={groupSelectedNodes}
                     onUndo={undoCanvas}
                     onRedo={redoCanvas}
                     onUpload={() => handleUploadRequest()}
@@ -2748,10 +2848,23 @@ function InfiniteCanvasPage() {
                 {contextMenu ? (
                     <CanvasNodeContextMenu
                         menu={contextMenu}
+                        canArrangeGroup={contextMenu.type === "node" && nodeById.get(contextMenu.nodeId)?.type === CanvasNodeType.Group}
+                        canCopyImage={contextMenu.type === "node" && nodeById.get(contextMenu.nodeId)?.type === CanvasNodeType.Image && Boolean(nodeById.get(contextMenu.nodeId)?.metadata?.content)}
                         onClose={() => setContextMenu(null)}
                         onDuplicate={() => {
                             if (contextMenu.type !== "node") return;
                             duplicateNode(contextMenu.nodeId);
+                            setContextMenu(null);
+                        }}
+                        onCopyImage={() => {
+                            if (contextMenu.type !== "node") return;
+                            const node = nodeById.get(contextMenu.nodeId);
+                            if (node) void copyNodeImage(node);
+                            setContextMenu(null);
+                        }}
+                        onArrangeGroup={() => {
+                            if (contextMenu.type !== "node") return;
+                            setNodes((prev) => arrangeGroupMembers(prev, contextMenu.nodeId));
                             setContextMenu(null);
                         }}
                         onDelete={() => {
@@ -3138,6 +3251,36 @@ function applyNodeConfigPatch(node: CanvasNodeData, patch: Partial<CanvasNodeDat
     return size && (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video) ? { ...next, ...size, position: { x: node.position.x + node.width / 2 - size.width / 2, y: node.position.y + node.height / 2 - size.height / 2 } } : next;
 }
 
+function nodeOverlapArea(first: CanvasNodeData, second: CanvasNodeData) {
+    const left = Math.max(first.position.x, second.position.x);
+    const top = Math.max(first.position.y, second.position.y);
+    const right = Math.min(first.position.x + first.width, second.position.x + second.width);
+    const bottom = Math.min(first.position.y + first.height, second.position.y + second.height);
+    return Math.max(0, right - left) * Math.max(0, bottom - top);
+}
+
+function findOverlapGroupPeer(dragged: CanvasNodeData, movedIds: Set<string>, nodes: CanvasNodeData[]) {
+    // Hero uses rectangle overlap on mouse-up. Require a meaningful overlap to avoid
+    // accidental grouping from grazing edges; prefer the top-most/largest target.
+    const draggedArea = Math.max(1, dragged.width * dragged.height);
+    return [...nodes]
+        .reverse()
+        .filter((node) => !movedIds.has(node.id) && node.id !== dragged.id && node.type !== CanvasNodeType.Group && !node.metadata?.groupId)
+        .map((node) => ({ node, overlap: nodeOverlapArea(dragged, node) }))
+        .filter(({ node, overlap }) => overlap >= Math.min(draggedArea, node.width * node.height) * 0.22)
+        .sort((a, b) => b.overlap - a.overlap)[0]?.node || null;
+}
+
+function createOverlapGroup(nodes: CanvasNodeData[], dragged: CanvasNodeData, target: CanvasNodeData) {
+    const minX = Math.min(dragged.position.x, target.position.x);
+    const minY = Math.min(dragged.position.y, target.position.y);
+    const group = createCanvasNode(CanvasNodeType.Group, { x: minX - 24, y: minY - 52 });
+    group.title = "智能分组（2 个节点）";
+    const ids = new Set([dragged.id, target.id]);
+    const grouped = [...nodes.map((node) => ids.has(node.id) ? { ...node, metadata: { ...node.metadata, groupId: group.id } } : node), group];
+    return arrangeGroupMembers(grouped, group.id);
+}
+
 function findGroupDropTarget(movedIds: Set<string>, nodes: CanvasNodeData[]) {
     if (nodes.some((node) => movedIds.has(node.id) && node.type === CanvasNodeType.Group)) return null;
     const movingNodes = nodes.filter((node) => movedIds.has(node.id) && node.type !== CanvasNodeType.Group);
@@ -3170,6 +3313,29 @@ function snapNodesIntoGroup(movedIds: Set<string>, nodes: CanvasNodeData[], grou
     return nodes.map((node) => {
         if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
         return { ...node, position: { x: node.position.x + dx, y: node.position.y + dy }, metadata: { ...node.metadata, groupId: group.id } };
+    });
+}
+
+function arrangeGroupMembers(nodes: CanvasNodeData[], groupId: string) {
+    const group = nodes.find((node) => node.id === groupId && node.type === CanvasNodeType.Group);
+    if (!group) return nodes;
+    const members = nodes.filter((node) => node.metadata?.groupId === groupId && node.type !== CanvasNodeType.Group).sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x);
+    if (!members.length) return nodes;
+    // Match hero smart groups: compact grid, title/header space, and a resized container.
+    const columns = Math.min(3, Math.max(1, Math.ceil(Math.sqrt(members.length))));
+    const gap = 24, padX = 24, header = 46, padBottom = 24;
+    const colWidths = Array.from({ length: columns }, (_, col) => Math.max(...members.filter((_, index) => index % columns === col).map((node) => node.width), 160));
+    const rows = Math.ceil(members.length / columns);
+    const rowHeights = Array.from({ length: rows }, (_, row) => Math.max(...members.filter((_, index) => Math.floor(index / columns) === row).map((node) => node.height), 90));
+    const xByCol = colWidths.reduce<number[]>((acc, width, index) => [...acc, index ? acc[index - 1] + colWidths[index - 1] + gap : group.position.x + padX], []);
+    const yByRow = rowHeights.reduce<number[]>((acc, height, index) => [...acc, index ? acc[index - 1] + rowHeights[index - 1] + gap : group.position.y + header], []);
+    const layout = new Map(members.map((node, index) => [node.id, { x: xByCol[index % columns] + (colWidths[index % columns] - node.width) / 2, y: yByRow[Math.floor(index / columns)] }]));
+    const width = padX * 2 + colWidths.reduce((total, value) => total + value, 0) + gap * (columns - 1);
+    const height = header + rowHeights.reduce((total, value) => total + value, 0) + gap * (rows - 1) + padBottom;
+    return nodes.map((node) => {
+        if (node.id === group.id) return { ...node, width, height };
+        const position = layout.get(node.id);
+        return position ? { ...node, position } : node;
     });
 }
 
@@ -3275,6 +3441,65 @@ function sourceNodeReferenceImages(node: CanvasNodeData | null) {
             storageKey: node.metadata.storageKey,
         },
     ];
+}
+
+function convertImageBlobToPng(blob: Blob) {
+    return new Promise<Blob>((resolve, reject) => {
+        const url = URL.createObjectURL(blob);
+        const image = new Image();
+        image.onload = () => {
+            try {
+                const canvas = document.createElement("canvas");
+                canvas.width = image.naturalWidth;
+                canvas.height = image.naturalHeight;
+                const context = canvas.getContext("2d");
+                if (!context) throw new Error("无法创建图片画布");
+                context.drawImage(image, 0, 0);
+                canvas.toBlob((png) => {
+                    URL.revokeObjectURL(url);
+                    if (png) resolve(png);
+                    else reject(new Error("转换 PNG 失败"));
+                }, "image/png");
+            } catch (error) {
+                URL.revokeObjectURL(url);
+                reject(error);
+            }
+        };
+        image.onerror = () => {
+            URL.revokeObjectURL(url);
+            reject(new Error("图片解码失败"));
+        };
+        image.src = url;
+    });
+}
+
+async function copyImageBlobWithSelection(blob: Blob) {
+    const url = URL.createObjectURL(blob);
+    const container = document.createElement("div");
+    const image = document.createElement("img");
+    container.contentEditable = "true";
+    container.setAttribute("aria-hidden", "true");
+    Object.assign(container.style, { position: "fixed", left: "-10000px", top: "0", opacity: "0", pointerEvents: "none" });
+    image.src = url;
+    container.appendChild(image);
+    document.body.appendChild(container);
+    try {
+        await image.decode();
+        const selection = window.getSelection();
+        if (!selection) return false;
+        const range = document.createRange();
+        range.selectNode(image);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        const copied = document.execCommand("copy");
+        selection.removeAllRanges();
+        return copied;
+    } catch {
+        return false;
+    } finally {
+        container.remove();
+        URL.revokeObjectURL(url);
+    }
 }
 
 function isAudioFile(file: File) {

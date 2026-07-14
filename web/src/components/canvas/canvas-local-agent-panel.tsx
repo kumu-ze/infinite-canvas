@@ -1,13 +1,13 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { App, Button, Input, Segmented, Tooltip } from "antd";
+import { App, Button, Input, Segmented, Select, Tooltip } from "antd";
 import copyToClipboard from "copy-to-clipboard";
 import { Copy, FolderOpen, History, KeyRound, Link2, LoaderCircle, PlugZap, Plus, RefreshCw, Square, Terminal, Trash2 } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
-import { useAgentStore, type AgentAttachment, type AgentChatItem, type AgentEventLog, type AgentPanelTab, type AgentPendingToolCall, type AgentThreadSummary } from "@/stores/use-agent-store";
+import { useAgentStore, type AgentAttachment, type AgentChatItem, type AgentCodexModel, type AgentEventLog, type AgentPanelTab, type AgentPendingToolCall, type AgentThreadSummary } from "@/stores/use-agent-store";
 import { summarizeCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { isSiteTool, runSiteTool, SITE_TOOL_LABELS } from "@/lib/agent/agent-site-tools";
 import { AgentChatComposer, AgentChatMessage, AgentPanelTabs, AgentPendingToolCard, AgentWorkingMessage, type CanvasAgentChatAttachment } from "./canvas-agent-chat-ui";
@@ -36,7 +36,9 @@ type AgentEventItem = { id?: string; type?: string; text?: unknown; message?: un
 type AgentLogContext = { endpoint: string; connected: boolean; enabled: boolean; activity: string; waiting: boolean; sending: boolean; messages: number; pendingTool?: string };
 type AgentWorkspace = { workspacePath: string; activeThreadId?: string };
 type AgentThreadsResponse = { ok?: boolean; workspace?: AgentWorkspace; data?: AgentThreadSummary[] };
-type AgentThreadResponse = { ok?: boolean; workspace?: AgentWorkspace; thread?: AgentThreadSummary; messages?: AgentChatItem[] };
+type AgentSelection = { model?: string; effort?: string };
+type AgentThreadResponse = { ok?: boolean; workspace?: AgentWorkspace; thread?: AgentThreadSummary; selection?: AgentSelection; messages?: AgentChatItem[] };
+type AgentModelsResponse = { ok?: boolean; data?: AgentCodexModel[] };
 type AgentConfigResponse = { ok?: boolean; url?: string; token?: string; hasToken?: boolean };
 
 export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean }) {
@@ -45,7 +47,7 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
     const { message, modal } = App.useApp();
     const [searchParams] = useSearchParams();
     const navigate = useNavigate();
-    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, messages, eventLogs, threads, activeThreadId, workspacePath, loadingThreads, activeTab, confirmTools, activity, connectError, pendingTool, canvasContext, setAgentState, addMessage: pushMessage, addEventLog: pushEventLog, clearEventLogs } = useAgentStore();
+    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, messages, eventLogs, threads, models, selectedModel, selectedEffort, activeThreadId, workspacePath, loadingThreads, loadingModels, activeTab, confirmTools, activity, connectError, pendingTool, canvasContext, setAgentState, addMessage: pushMessage, addEventLog: pushEventLog, clearEventLogs } = useAgentStore();
     const listRef = useRef<HTMLDivElement>(null);
     const canvasContextRef = useRef(canvasContext);
     const confirmToolsRef = useRef(confirmTools);
@@ -54,7 +56,7 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
     const connectedRef = useRef(false);
     const errorLoggedRef = useRef(false);
     const attachmentUrlsRef = useRef(new Set<string>());
-    const clientIdRef = useRef(typeof crypto === "undefined" ? `${Date.now()}` : crypto.randomUUID());
+    const clientIdRef = useRef(createId());
     const endpoint = useMemo(() => url.trim().replace(/\/$/, ""), [url]);
     const urlAgentAutoConnect = searchParams.has("agentUrl") && searchParams.has("agentToken");
     const loadThreads = useCallback(async () => {
@@ -69,7 +71,7 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
                 activeThreadId: nextThreadId,
                 messages: [],
             });
-            if (nextThreadId) {
+            if (nextThreadId && (data.data || []).some((thread) => thread.id === nextThreadId)) {
                 const thread = await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(nextThreadId)}`);
                 setAgentState({ messages: normalizeHistoryMessages(thread.messages || []) });
             }
@@ -77,6 +79,25 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
             addEventLog("读取历史失败", error);
         } finally {
             setAgentState({ loadingThreads: false });
+        }
+    }, [endpoint, setAgentState, token]);
+
+    const loadModels = useCallback(async () => {
+        if (!connectedRef.current && !useAgentStore.getState().connected) return;
+        setAgentState({ loadingModels: true });
+        try {
+            const data = await fetchAgentJson<AgentModelsResponse>(endpoint, token, "/agent/codex/models");
+            const nextModels = data.data || [];
+            const current = useAgentStore.getState();
+            const nextModel = current.selectedModel && !nextModels.some((item) => item.model === current.selectedModel) ? "" : current.selectedModel;
+            const activeModel = nextModels.find((item) => item.model === nextModel) || nextModels.find((item) => item.isDefault);
+            const nextEffort = current.selectedEffort && !activeModel?.supportedReasoningEfforts.some((item) => item.reasoningEffort === current.selectedEffort) ? "" : current.selectedEffort;
+            persistCodexSelection(nextModel, nextEffort);
+            setAgentState({ models: nextModels, selectedModel: nextModel, selectedEffort: nextEffort });
+        } catch (error) {
+            addEventLog("读取模型失败", error);
+        } finally {
+            setAgentState({ loadingModels: false });
         }
     }, [endpoint, setAgentState, token]);
 
@@ -152,8 +173,10 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
     }, [enabled, endpoint, loadThreads, message, setAgentState, token]);
 
     useEffect(() => {
-        if (connected) void loadThreads();
-    }, [connected, loadThreads]);
+        if (!connected) return;
+        void loadThreads();
+        void loadModels();
+    }, [connected, loadModels, loadThreads]);
 
     useEffect(() => {
         if (!connected) return;
@@ -174,7 +197,8 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
         addMessage({ role: "user", text: text || "发送了图片", attachments: files });
         addEventLog("用户发送", { text, attachments: files.map(({ name, type, size }) => ({ name, type, size })) });
         try {
-            const res = await fetch(`${endpoint}/agent/codex/turn?token=${encodeURIComponent(token)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: requestPrompt, threadId: useAgentStore.getState().activeThreadId || undefined, attachments: files.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })) }) });
+            const state = useAgentStore.getState();
+            const res = await fetch(`${endpoint}/agent/codex/turn?token=${encodeURIComponent(token)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: requestPrompt, threadId: state.activeThreadId || undefined, ...codexSelectionPayload(state.selectedModel, state.selectedEffort), attachments: files.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })) }) });
             if (!res.ok) throw new Error("本地 Agent 拒绝了请求");
             const data = (await res.json()) as { threadId?: string };
             if (data.threadId) setAgentState({ activeThreadId: data.threadId });
@@ -386,11 +410,12 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
         pendingToolRef.current = null;
     }
 
-    const startNewThread = async () => {
+    const startNewThread = async (selection?: { model: string; effort: string }) => {
         if (!connected) return;
         setAgentState({ loadingThreads: true });
         try {
-            const data = await fetchAgentJson<AgentThreadResponse>(endpoint, token, "/agent/codex/threads/new", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+            const current = selection || { model: useAgentStore.getState().selectedModel, effort: useAgentStore.getState().selectedEffort };
+            const data = await fetchAgentJson<AgentThreadResponse>(endpoint, token, "/agent/codex/threads/new", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(codexSelectionPayload(current.model, current.effort)) });
             setAgentState({ activeThreadId: data.thread?.id || data.workspace?.activeThreadId || "", messages: [], activeTab: "chat", activity: "新对话" });
             await loadThreads();
         } catch (error) {
@@ -406,7 +431,10 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
         setAgentState({ loadingThreads: true });
         try {
             const data = await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(threadId)}/resume`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
-            setAgentState({ activeThreadId: data.thread?.id || threadId, messages: normalizeHistoryMessages(data.messages || []), activeTab: "chat", activity: "已恢复会话" });
+            const model = data.selection?.model || "";
+            const effort = data.selection?.effort || "";
+            persistCodexSelection(model, effort);
+            setAgentState({ selectedModel: model, selectedEffort: effort, activeThreadId: data.thread?.id || threadId, messages: normalizeHistoryMessages(data.messages || []), activeTab: "chat", activity: "已恢复会话" });
             await loadThreads();
         } catch (error) {
             addEventLog("恢复对话失败", error);
@@ -414,6 +442,19 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
         } finally {
             setAgentState({ loadingThreads: false });
         }
+    };
+
+    const changeModel = (model: string) => {
+        const effort = model ? models.find((item) => item.model === model)?.defaultReasoningEffort || "" : "";
+        persistCodexSelection(model, effort);
+        setAgentState({ selectedModel: model, selectedEffort: effort });
+        if (connected) void startNewThread({ model, effort });
+    };
+
+    const changeEffort = (effort: string) => {
+        persistCodexSelection(selectedModel, effort);
+        setAgentState({ selectedEffort: effort });
+        if (connected) void startNewThread({ model: selectedModel, effort });
     };
 
     const deleteThread = async (threadId: string) => {
@@ -505,7 +546,7 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
                 }}
                 right={
                     <>
-                        <Button size="small" type="text" disabled={!connected || loadingThreads} icon={<Plus className="size-3.5" />} onClick={startNewThread}>
+                        <Button size="small" type="text" disabled={!connected || loadingThreads} icon={<Plus className="size-3.5" />} onClick={() => void startNewThread()}>
                             新对话
                         </Button>
                     </>
@@ -556,6 +597,16 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
                         {pendingTool ? <AgentPendingToolCard summary={summarizeCanvasAgentOps(pendingTool.input?.ops || []) || toolName(pendingTool.name)} detail={{ requestId: pendingTool.requestId, name: pendingTool.name, input: pendingTool.input }} theme={theme} onReject={rejectPendingTool} onApprove={approvePendingTool} /> : null}
                         {waiting && !pendingTool ? <AgentWorkingMessage theme={theme} /> : null}
                     </div>
+                    <AgentModelControls
+                        models={models}
+                        model={selectedModel}
+                        effort={selectedEffort}
+                        loading={loadingModels || loadingThreads}
+                        disabled={!connected || sending || waiting}
+                        theme={theme}
+                        onModelChange={changeModel}
+                        onEffortChange={changeEffort}
+                    />
                     <AgentChatComposer
                         prompt={prompt}
                         attachments={attachments.map(agentAttachmentToChatAttachment)}
@@ -577,6 +628,18 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
 
     if (headless) return null;
     return embedded ? content : null;
+}
+
+function AgentModelControls({ models, model, effort, loading, disabled, theme, onModelChange, onEffortChange }: { models: AgentCodexModel[]; model: string; effort: string; loading: boolean; disabled: boolean; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; onModelChange: (value: string) => void; onEffortChange: (value: string) => void }) {
+    const activeModel = models.find((item) => item.model === model) || models.find((item) => item.isDefault);
+    const modelOptions = [{ value: "", label: "跟随 Codex" }, ...models.map((item) => ({ value: item.model, label: item.displayName || item.model }))];
+    const effortOptions = [{ value: "", label: "默认强度" }, ...(activeModel?.supportedReasoningEfforts || []).map((item) => ({ value: item.reasoningEffort, label: reasoningEffortLabel(item.reasoningEffort) }))];
+    return (
+        <div className="flex h-9 shrink-0 items-center gap-2 px-3" style={{ color: theme.node.muted }}>
+            <Select aria-label="Codex 模型" size="small" showSearch optionFilterProp="label" className="min-w-0 flex-1" value={model} options={modelOptions} loading={loading} disabled={disabled} onChange={onModelChange} />
+            <Select aria-label="推理强度" size="small" className="w-28 shrink-0" value={effort} options={effortOptions} disabled={disabled || !activeModel} onChange={onEffortChange} />
+        </div>
+    );
 }
 
 function AgentLogView({ logs, theme, context, onClear, onCopied, onCopyBlocked }: { logs: AgentEventLog[]; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; context: AgentLogContext; onClear: () => void; onCopied: (text: string) => void; onCopyBlocked: (text: string) => void }) {
@@ -1010,6 +1073,20 @@ function formatBytes(bytes: number) {
     return bytes > 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)}MB` : `${Math.ceil(bytes / 1024)}KB`;
 }
 
+function codexSelectionPayload(model: string, effort: string) {
+    return { ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+}
+
+function persistCodexSelection(model: string, effort: string) {
+    if (typeof localStorage === "undefined") return;
+    model ? localStorage.setItem("canvas-agent-codex-model", model) : localStorage.removeItem("canvas-agent-codex-model");
+    effort ? localStorage.setItem("canvas-agent-codex-effort", effort) : localStorage.removeItem("canvas-agent-codex-effort");
+}
+
+function reasoningEffortLabel(value: string) {
+    return ({ none: "无", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "超高", max: "最大", ultra: "多智能体" } as Record<string, string>)[value] || value;
+}
+
 async function fetchAgentJson<T>(endpoint: string, token: string, path: string, init?: RequestInit) {
     const url = `${endpoint}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
     const res = await fetch(url, init);
@@ -1045,7 +1122,7 @@ function formatThreadTime(value?: number) {
 }
 
 function createId() {
-    return typeof crypto === "undefined" ? `${Date.now()}-${Math.random()}` : crypto.randomUUID();
+    return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function clamp(value: number, min: number, max: number) {

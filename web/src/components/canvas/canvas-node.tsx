@@ -24,6 +24,7 @@ type CanvasNodeProps = {
     showPanel: boolean;
     showImageInfo: boolean;
     resourceLabel?: CanvasResourceReference;
+    linkedPromptTexts?: string[];
     mentionReferences?: CanvasResourceReference[];
     renderPanel?: (node: CanvasNodeData) => ReactNode;
     renderNodeContent?: (node: CanvasNodeData) => ReactNode;
@@ -83,6 +84,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     showPanel,
     showImageInfo,
     resourceLabel,
+    linkedPromptTexts = [],
     mentionReferences = [],
     renderPanel,
     renderNodeContent,
@@ -398,6 +400,13 @@ export const CanvasNode = React.memo(function CanvasNode({
                 <ResizeHandle corner="bottom-left" onMouseDown={handleResizeMouseDown} />
                 <ResizeHandle corner="bottom-right" onMouseDown={handleResizeMouseDown} />
             </div>
+
+            {data.type === CanvasNodeType.Image && linkedPromptTexts.length ? (
+                <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-3 w-[min(360px,calc(100%+80px))] -translate-x-1/2 rounded-xl border px-3 py-2 shadow-lg" style={{ background: `${theme.toolbar.panel}F2`, borderColor: theme.toolbar.border, color: theme.node.text }}>
+                    <div className="mb-1 text-[10px] font-semibold tracking-[0.14em] opacity-45">链接文本</div>
+                    <div className="line-clamp-3 whitespace-pre-wrap break-words text-xs leading-5 opacity-85">{linkedPromptTexts.join("\n\n")}</div>
+                </div>
+            ) : null}
 
             {!isGroup ? <ConnectionHandleDot side="left" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "target")} /> : null}
             {!isGroup ? <ConnectionHandleDot side="right" visible={data.type !== CanvasNodeType.Config && (hovered || isSelected || isConnecting)} onMouseDown={(event) => onConnectStart(event, data.id, "source")} /> : null}

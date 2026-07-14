@@ -2,6 +2,13 @@
 
 ## Unreleased
 
++ [新增] 本地 Agent 对话栏支持从 Codex 动态读取并切换模型与推理强度，切换后自动创建独立新对话。
++ [修复] 本地 Agent 面板在局域网 HTTP 页面缺少 `crypto.randomUUID` 时使用安全回退，避免 NAS 部署页面崩溃。
++ [修复] 新建但尚未发送消息的 Codex 空对话不再触发历史读取错误。
++ [修复] 本地 Agent 在发送图片附件给 Codex 前统一解码并转成 PNG，避免 AVIF、HEIC 或伪扩展名图片触发无效图片错误。
++ [新增] 本地 Agent 新增 `assets_add_file` 工具，可把聊天附件或工作区本地图片直接加入「我的素材」。
++ [修复] 本地 Agent 在 Windows 的 `X:` SMB 映射工作空间中自动使用兼容沙盒模式，避免目录访问被拒绝。
+
 ## v0.7.0 - 2026-07-14
 
 + [新增] Agent 对话消息改用 streamdown 流式渲染，提升Markdown 内容展示效果。

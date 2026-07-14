@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowUp, LoaderCircle, Square } from "lucide-react";
+import { ArrowUp, FileText, Image as ImageIcon, LoaderCircle, Music2, Square, Video } from "lucide-react";
 import { Button } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
@@ -13,6 +13,7 @@ import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textare
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
 import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import type { NodeGenerationInput } from "./canvas-node-generation";
 
 export type CanvasNodeGenerationMode = CanvasGenerationMode;
 
@@ -24,10 +25,11 @@ type CanvasNodePromptPanelProps = {
     onGenerate: (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => void;
     onStop: (nodeId: string) => void;
     mentionReferences?: CanvasResourceReference[];
+    linkedInputs?: NodeGenerationInput[];
     onImageSettingsOpenChange?: (open: boolean) => void;
 };
 
-export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onGenerate, onStop, mentionReferences = [], onImageSettingsOpenChange }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onGenerate, onStop, mentionReferences = [], linkedInputs = [], onImageSettingsOpenChange }: CanvasNodePromptPanelProps) {
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -48,7 +50,8 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     };
 
     const submit = () => {
-        const text = prompt.trim();
+        const linkedText = linkedInputs.filter((input) => input.type === "text").map((input) => input.text || "").filter(Boolean).join("\n\n").trim();
+        const text = prompt.trim() || linkedText || (linkedInputs.length ? "请参考已连接素材生成一张风格和内容协调的新图片" : "");
         if (!text || isRunning) return;
         onGenerate(node.id, mode, text);
         setPrompt("");
@@ -62,6 +65,17 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
             onPointerDown={(event) => event.stopPropagation()}
             onWheel={(event) => event.stopPropagation()}
         >
+            {node.type === CanvasNodeType.Image && !node.metadata?.content && linkedInputs.length ? (
+                <div className="mb-2 flex max-w-[680px] flex-wrap gap-1.5">
+                    {linkedInputs.map((input, index) => {
+                        const typeIndex = linkedInputs.slice(0, index + 1).filter((item) => item.type === input.type).length;
+                        const label = input.type === "image" ? `图片${typeIndex}` : input.type === "text" ? `文本${typeIndex}` : input.type === "video" ? `视频${typeIndex}` : `音频${typeIndex}`;
+                        const Icon = input.type === "image" ? ImageIcon : input.type === "text" ? FileText : input.type === "video" ? Video : Music2;
+                        return <span key={input.nodeId} className="inline-flex max-w-44 items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px]" style={{ background: theme.node.fill, borderColor: theme.node.stroke }} title={input.text || input.title}><Icon className="size-3" /><span className="truncate">{label}{input.type === "text" && input.text ? ` · ${input.text}` : ""}</span></span>;
+                    })}
+                </div>
+            ) : null}
+
             <CanvasResourceMentionTextarea
                 value={prompt}
                 references={mentionReferences}
@@ -105,7 +119,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                     type="primary"
                     className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
                     danger={isRunning}
-                    disabled={!isRunning && !prompt.trim()}
+                    disabled={!isRunning && !prompt.trim() && !linkedInputs.length}
                     onClick={() => (isRunning ? onStop(node.id) : submit())}
                     aria-label={isRunning ? "停止生成" : "生成"}
                 >

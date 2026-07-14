@@ -1,12 +1,30 @@
 import { useEffect } from "react";
 import type { ReactNode } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { Copy, Grid2x2, Plus, Trash2 } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ContextMenuState } from "@/types/canvas";
 
-export function CanvasNodeContextMenu({ menu, onClose, onDuplicate, onDelete }: { menu: ContextMenuState; onClose: () => void; onDuplicate: () => void; onDelete: () => void }) {
+export function CanvasNodeContextMenu({
+    menu,
+    canArrangeGroup = false,
+    canCopyImage = false,
+    onClose,
+    onDuplicate,
+    onCopyImage,
+    onArrangeGroup,
+    onDelete,
+}: {
+    menu: ContextMenuState;
+    canArrangeGroup?: boolean;
+    canCopyImage?: boolean;
+    onClose: () => void;
+    onDuplicate: () => void;
+    onCopyImage?: () => void;
+    onArrangeGroup?: () => void;
+    onDelete: () => void;
+}) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
 
     useEffect(() => {
@@ -25,7 +43,9 @@ export function CanvasNodeContextMenu({ menu, onClose, onDuplicate, onDelete }: 
             style={{ left: menu.x, top: menu.y, background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
             onPointerDown={(event) => event.stopPropagation()}
         >
-            {menu.type === "node" ? <MenuButton icon={<Plus className="size-4" />} label="复制" onClick={onDuplicate} /> : null}
+            {menu.type === "node" ? <MenuButton icon={<Plus className="size-4" />} label="复制节点" onClick={onDuplicate} /> : null}
+            {menu.type === "node" && canCopyImage ? <MenuButton icon={<Copy className="size-4" />} label="复制图片到剪贴板" onClick={onCopyImage} /> : null}
+            {menu.type === "node" && canArrangeGroup ? <MenuButton icon={<Grid2x2 className="size-4" />} label="整理组内节点" onClick={onArrangeGroup} /> : null}
             <MenuButton icon={<Trash2 className="size-4" />} label="删除" onClick={onDelete} danger />
         </div>
     );

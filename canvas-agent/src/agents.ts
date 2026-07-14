@@ -11,7 +11,9 @@ import type { AgentAttachment, AgentEmit } from "./types.js";
 type Json = Record<string, unknown>;
 type AgentEvent = Json & { type: string; usage?: unknown };
 type PendingRequest = { resolve: (value: unknown) => void; reject: (error: Error) => void };
-type CodexRunOptions = { threadId?: string; cwd?: string };
+export type CodexSelection = { model?: string; effort?: string };
+type CodexRunOptions = CodexSelection & { threadId?: string; cwd?: string };
+type CodexThreadResult = { thread: Json; selection: CodexSelection };
 type AgentHistoryMessage = { id: string; role: "user" | "assistant" | "tool" | "error"; title?: string; text: string; detail?: unknown; streamId?: string };
 
 let codexQueue: Promise<unknown> = Promise.resolve();
@@ -39,16 +41,17 @@ async function runCodexTurnNow(prompt: string, emit: AgentEmit, attachments: Age
     let files: string[] = [];
     try {
         files = await writeAttachmentFiles(attachments);
+        const turnPrompt = withAttachmentPaths(prompt, files);
         codexApp ||= await CodexAppClient.start(emit);
         let threadId = await ensureCodexThread(codexApp, options, emit);
         try {
-            await codexApp.startTurn(threadId, prompt, files);
+            await codexApp.startTurn(threadId, turnPrompt, files, options);
         } catch (error) {
             if (!isRecoverableThreadError(error)) throw error;
             emit("agent_log", { text: `Codex thread unavailable, starting a new thread: ${errorMessage(error)}` });
             codexThreadId = "";
             threadId = await ensureCodexThread(codexApp, { cwd: options.cwd }, emit);
-            await codexApp.startTurn(threadId, prompt, files);
+            await codexApp.startTurn(threadId, turnPrompt, files, options);
         }
     } catch (error) {
         emit("agent_error", { message: errorMessage(error) });
@@ -57,20 +60,27 @@ async function runCodexTurnNow(prompt: string, emit: AgentEmit, attachments: Age
     }
 }
 
-export async function startCodexThread(emit: AgentEmit, cwd?: string) {
+export async function startCodexThread(emit: AgentEmit, cwd?: string, selection: CodexSelection = {}) {
     codexApp ||= await CodexAppClient.start(emit);
-    const thread = await codexApp.startThread(cwd);
-    codexThreadId = String(field(thread, "id") || "");
-    return thread;
+    const result = await codexApp.startThread({ cwd, ...selection });
+    codexThreadId = String(field(result.thread, "id") || "");
+    return result;
 }
 
 export async function resumeCodexThread(emit: AgentEmit, threadId: string, cwd?: string) {
     codexApp ||= await CodexAppClient.start(emit);
     await loadCodexThread(emit, threadId, cwd, false);
-    const thread = await codexApp.resumeThread(threadId, cwd);
-    assertThreadWorkspace(thread, cwd);
-    codexThreadId = String(field(thread, "id") || threadId);
-    return { thread, messages: threadMessages(thread) };
+    const result = await codexApp.resumeThread(threadId, cwd);
+    assertThreadWorkspace(result.thread, cwd);
+    codexThreadId = String(field(result.thread, "id") || threadId);
+    return { ...result, messages: threadMessages(result.thread) };
+}
+
+export async function listCodexModels(emit: AgentEmit) {
+    codexApp ||= await CodexAppClient.start(emit);
+    const result = await codexApp.listModels();
+    const data = Array.isArray(field(result, "data")) ? (field(result, "data") as unknown[]).map(summarizeCodexModel).filter(Boolean) : [];
+    return { data };
 }
 
 export async function listCodexThreads(emit: AgentEmit, options: { cwd: string; searchTerm?: string; limit?: number }) {
@@ -113,11 +123,11 @@ async function ensureCodexThread(app: CodexAppClient, options: CodexRunOptions, 
     if (options.threadId) {
         if (options.threadId === codexThreadId) return codexThreadId;
         try {
-            const result = await app.readThread(options.threadId, false);
-            assertThreadWorkspace(field(result, "thread") || {}, options.cwd);
-            const thread = await app.resumeThread(options.threadId, options.cwd);
-            assertThreadWorkspace(thread, options.cwd);
-            codexThreadId = String(field(thread, "id") || options.threadId);
+            const readResult = await app.readThread(options.threadId, false);
+            assertThreadWorkspace(field(readResult, "thread") || {}, options.cwd);
+            const resumeResult = await app.resumeThread(options.threadId, options.cwd);
+            assertThreadWorkspace(resumeResult.thread, options.cwd);
+            codexThreadId = String(field(resumeResult.thread, "id") || options.threadId);
             return codexThreadId;
         } catch (error) {
             if (!isRecoverableThreadError(error)) throw error;
@@ -125,8 +135,8 @@ async function ensureCodexThread(app: CodexAppClient, options: CodexRunOptions, 
         }
     }
     if (!codexThreadId) {
-        const thread = await app.startThread(options.cwd);
-        codexThreadId = String(field(thread, "id") || "");
+        const result = await app.startThread(options);
+        codexThreadId = String(field(result.thread, "id") || "");
     }
     return codexThreadId;
 }
@@ -164,24 +174,28 @@ class CodexAppClient {
         return client;
     }
 
-    async startThread(cwd?: string) {
-        const result = await this.request("thread/start", { approvalPolicy: "never", sandbox: "workspace-write", config: codexConfig(), ...(cwd ? { cwd } : {}), threadSource: "user" });
+    async startThread(options: CodexSelection & { cwd?: string } = {}): Promise<CodexThreadResult> {
+        const result = await this.request("thread/start", { approvalPolicy: "never", sandbox: codexSandbox(options.cwd), config: codexConfig(options.effort), ...(options.cwd ? { cwd: options.cwd } : {}), ...(options.model ? { model: options.model } : {}), threadSource: "user" });
         const thread = field(result, "thread") as Json | undefined;
         const id = String(field(thread, "id") || "");
         if (!id) throw new Error("Codex app-server 没有返回 thread id");
-        return thread || {};
+        return { thread: thread || {}, selection: codexSelection(result) };
     }
 
-    async resumeThread(threadId: string, cwd?: string) {
-        const result = await this.request("thread/resume", { threadId, approvalPolicy: "never", sandbox: "workspace-write", config: codexConfig(), ...(cwd ? { cwd } : {}) });
+    async resumeThread(threadId: string, cwd?: string): Promise<CodexThreadResult> {
+        const result = await this.request("thread/resume", { threadId, approvalPolicy: "never", sandbox: codexSandbox(cwd), config: codexConfig(), ...(cwd ? { cwd } : {}) });
         const thread = field(result, "thread") as Json | undefined;
         const id = String(field(thread, "id") || "");
         if (!id) throw new Error("Codex app-server 没有返回 thread id");
-        return thread || {};
+        return { thread: thread || {}, selection: codexSelection(result) };
     }
 
     listThreads(params: Json) {
         return this.request("thread/list", params);
+    }
+
+    listModels() {
+        return this.request("model/list", { limit: 100, includeHidden: false });
     }
 
     readThread(threadId: string, includeTurns = true) {
@@ -192,8 +206,8 @@ class CodexAppClient {
         return this.request("thread/archive", { threadId });
     }
 
-    async startTurn(threadId: string, prompt: string, images: string[]) {
-        const result = await this.request("turn/start", { threadId, input: codexInput(prompt, images), approvalPolicy: "never" });
+    async startTurn(threadId: string, prompt: string, images: string[], selection: CodexSelection = {}) {
+        const result = await this.request("turn/start", { threadId, input: codexInput(prompt, images), approvalPolicy: "never", ...(selection.model ? { model: selection.model } : {}), ...(selection.effort ? { effort: selection.effort } : {}) });
         const turnId = String(field(field(result, "turn"), "id") || "");
         if (!turnId) throw new Error("Codex app-server 没有返回 turn id");
         const completed = this.completedTurns.get(turnId);
@@ -312,8 +326,12 @@ function canvasAgentMcpCommand() {
     return entry.endsWith(".ts") ? { command: process.execPath, args: [tsx, entry, "mcp"] } : { command: process.execPath, args: [entry, "mcp"] };
 }
 
-function codexConfig() {
-    return { mcp_servers: { "infinite-canvas": { command: canvasAgentMcp.command, args: canvasAgentMcp.args, default_tools_approval_mode: "approve", startup_timeout_sec: 20, tool_timeout_sec: 90 } } };
+function codexConfig(effort?: string) {
+    return { ...(effort ? { model_reasoning_effort: effort } : {}), mcp_servers: { "infinite-canvas": { command: canvasAgentMcp.command, args: canvasAgentMcp.args, default_tools_approval_mode: "approve", startup_timeout_sec: 20, tool_timeout_sec: 90 } } };
+}
+
+function codexSandbox(cwd?: string) {
+    return process.platform === "win32" && /^[vx]:[\\/]/i.test(String(cwd || "")) ? "danger-full-access" : "workspace-write";
 }
 
 function codexInput(prompt: string, images: string[]) {
@@ -395,6 +413,26 @@ export function summarizeCodexThread(thread: unknown) {
     };
 }
 
+function summarizeCodexModel(value: unknown) {
+    const model = String(field(value, "model") || field(value, "id") || "").trim();
+    if (!model) return null;
+    return {
+        id: String(field(value, "id") || model),
+        model,
+        displayName: String(field(value, "displayName") || model),
+        description: String(field(value, "description") || ""),
+        isDefault: Boolean(field(value, "isDefault")),
+        defaultReasoningEffort: String(field(value, "defaultReasoningEffort") || ""),
+        supportedReasoningEfforts: arrayValue(field(value, "supportedReasoningEfforts")).map((item) => ({ reasoningEffort: String(field(item, "reasoningEffort") || ""), description: String(field(item, "description") || "") })).filter((item) => item.reasoningEffort),
+    };
+}
+
+function codexSelection(result: unknown): CodexSelection {
+    const model = String(field(result, "model") || "").trim();
+    const effort = String(field(result, "reasoningEffort") || "").trim();
+    return { ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+}
+
 function threadMessages(thread: unknown): AgentHistoryMessage[] {
     const turns = arrayValue(field(thread, "turns"));
     const messages: AgentHistoryMessage[] = [];
@@ -466,25 +504,52 @@ function toolName(name: string) {
     if (name === "canvas_generate_video") return "生成视频";
     if (name === "canvas_generate_audio") return "生成音频";
     if (name === "canvas_run_generation") return "触发生成";
+    if (name === "assets_add_file") return "上传图片素材";
     return name;
 }
 
+function withAttachmentPaths(prompt: string, files: string[]) {
+    if (!files.length) return prompt;
+    return `${prompt}\n\n图片附件临时绝对路径（顺序与附件名称一致）：\n${files.join("\n")}\n用户要求把附件加入「我的素材」时，调用 assets_add_file。`;
+}
+
 async function writeAttachmentFiles(attachments: AgentAttachment[]) {
-    return await Promise.all(attachments.filter((item) => item.dataUrl?.startsWith("data:image/")).map(writeAttachmentFile));
+    const files: string[] = [];
+    try {
+        for (const item of attachments.filter((attachment) => attachment.dataUrl?.startsWith("data:image/"))) files.push(await writeAttachmentFile(item));
+        return files;
+    } catch (error) {
+        await Promise.all(files.map((file) => fs.unlink(file).catch(() => undefined)));
+        throw error;
+    }
 }
 
 async function writeAttachmentFile(item: AgentAttachment) {
-    const [, meta = "", data = ""] = item.dataUrl?.match(/^data:([^;]+);base64,(.+)$/) || [];
+    const [, , data = ""] = item.dataUrl?.match(/^data:([^;]+);base64,(.+)$/) || [];
     if (!data) throw new Error(`图片附件无效：${item.name || "未命名图片"}`);
-    const file = path.join(os.tmpdir(), `infinite-canvas-${Date.now()}-${Math.random().toString(16).slice(2)}.${imageExt(meta || item.type)}`);
-    await fs.writeFile(file, Buffer.from(data, "base64"));
-    return file;
+    const id = `infinite-canvas-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const source = path.join(os.tmpdir(), `${id}.input`);
+    const output = path.join(os.tmpdir(), `${id}.png`);
+    await fs.writeFile(source, Buffer.from(data, "base64"));
+    try {
+        await convertImageToPng(source, output, item.name || "未命名图片");
+        return output;
+    } catch (error) {
+        await fs.unlink(output).catch(() => undefined);
+        throw error;
+    } finally {
+        await fs.unlink(source).catch(() => undefined);
+    }
 }
 
-function imageExt(type = "") {
-    if (type.includes("png")) return "png";
-    if (type.includes("webp")) return "webp";
-    return "jpg";
+async function convertImageToPng(source: string, output: string, name: string) {
+    await new Promise<void>((resolve, reject) => {
+        const child = spawn("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", source, "-frames:v", "1", output], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+        let stderr = "";
+        child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+        child.once("error", () => reject(new Error("无法启动 ffmpeg，图片附件不能转成 Codex 支持的 PNG")));
+        child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`图片附件无法解码：${name}${stderr.trim() ? `（${stderr.trim().slice(-300)}）` : ""}`)));
+    });
 }
 
 function codexBin() {

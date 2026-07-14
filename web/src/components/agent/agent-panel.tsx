@@ -50,14 +50,14 @@ export function AgentPanel() {
             initial={{ width: 0, opacity: 0 }}
             animate={{ width: panelOpen ? width + 1 : 0, opacity: panelOpen ? 1 : 0 }}
             transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: [0.22, 1, 0.36, 1] }}
-            style={{ overflow: "clip", pointerEvents: panelClosing ? "none" : undefined }}
+            style={{ overflow: "clip", pointerEvents: panelClosing ? "none" : undefined, maxWidth: "100vw" }}
         >
             <motion.aside
                 className="relative flex h-full shrink-0 flex-col border-l"
                 initial={{ x: 48 }}
                 animate={{ x: panelClosing ? 28 : 0 }}
                 transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: [0.22, 1, 0.36, 1] }}
-                style={{ width, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
+                style={{ width, maxWidth: "100vw", background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
             >
                 <button type="button" className="absolute inset-y-0 left-0 z-40 w-4 -translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label="调整右侧面板宽度" />
                 <header className="flex h-14 shrink-0 items-center justify-between border-b px-4" style={{ borderColor: theme.node.stroke }}>

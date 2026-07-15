@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: publish-canvas-agent
@@ -28,8 +29,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.14.0
           registry-url: https://registry.npmjs.org
+
+      - name: Enable npm trusted publishing
+        run: npm install --global npm@11.5.1
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
@@ -51,8 +55,6 @@ jobs:
       - name: Publish to npm
         if: steps.package.outputs.should_publish == 'true'
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Skip existing version
         if: steps.package.outputs.should_publish != 'true'

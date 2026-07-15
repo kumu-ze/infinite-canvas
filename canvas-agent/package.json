@@ -1,11 +1,11 @@
 {
-  "name": "@basketikun/canvas-agent",
-  "version": "0.2.0",
+  "name": "@kumuze/canvas-agent",
+  "version": "0.2.1",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "canvas-agent": "./dist/index.js"
+    "canvas-agent": "dist/index.js"
   },
   "files": [
     "dist",
@@ -31,6 +31,11 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kumu-ze/infinite-canvas.git",
+    "directory": "canvas-agent"
   },
   "publishConfig": {
     "access": "public"

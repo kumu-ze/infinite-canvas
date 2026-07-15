@@ -9,6 +9,10 @@
 + [新增] 本地 Agent 新增 `assets_add_file` 工具，可把聊天附件或工作区本地图片直接加入「我的素材」。
 + [修复] 本地 Agent 在 Windows 的 `X:` SMB 映射工作空间中自动使用兼容沙盒模式，避免目录访问被拒绝。
 
+## v0.7.1 - 2026-07-15
+
++ [修复] 修复通过 `crypto.randomUUID` 不可用导致页面白屏报错的问题，改用 nanoid 生成 id。
+
 ## v0.7.0 - 2026-07-14
 
 + [新增] Agent 对话消息改用 streamdown 流式渲染，提升Markdown 内容展示效果。

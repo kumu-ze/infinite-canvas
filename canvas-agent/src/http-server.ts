@@ -3,6 +3,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { DEFAULT_PORT, ensureSiteWorkspace, loadConfig, saveConfig, updateSiteWorkspace, type CanvasAgentConfig } from "./config.js";
 import { CanvasSession } from "./canvas-session.js";
 import { archiveCodexThread, interruptCodexTurn, listCodexModels, listCodexThreads, readCodexThread, resumeCodexThread, runClaudeTurn, runCodexTurn, startCodexThread, summarizeCodexThread, verifyCodexThreadWorkspace, withAgentPrompt, type CodexSelection } from "./agents.js";
+import { copyPngToClipboard } from "./image-clipboard.js";
 import type { AgentAttachment } from "./types.js";
 
 export function startHttpServer() {
@@ -38,6 +39,11 @@ export function startHttpServer() {
         session.resolveResult(req.body);
         res.json({ ok: true });
     });
+    app.post("/clipboard/image", express.raw({ type: "image/png", limit: "30mb" }), route(async (req, res) => {
+        if (!Buffer.isBuffer(req.body) || !req.body.length) throw new Error("缺少 PNG 图片内容");
+        await copyPngToClipboard(req.body);
+        res.json({ ok: true });
+    }));
     app.post("/api/tools", route(async (req, res) => res.json({ ok: true, result: await session.callTool(req.body?.name, req.body?.input || {}) })));
     app.get("/agent/codex/workspace", (_req, res) => {
         const workspace = ensureSiteWorkspace(config);
@@ -47,14 +53,14 @@ export function startHttpServer() {
     app.get("/agent/codex/threads", route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const result = await listCodexThreads(emit, { cwd: workspace.workspacePath, searchTerm: String(req.query.searchTerm || "") });
-        res.json({ ok: true, workspace, ...result });
+        const activeThreadId = result.data.some((thread) => thread.id === workspace.activeThreadId) ? workspace.activeThreadId : undefined;
+        const nextWorkspace = activeThreadId === workspace.activeThreadId ? workspace : updateSiteWorkspace(config, { activeThreadId });
+        res.json({ ok: true, workspace: nextWorkspace, ...result });
     }));
     app.post("/agent/codex/threads/new", route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
-        const result = await startCodexThread(emit, workspace.workspacePath, codexSelection(req.body));
-        const activeThreadId = String(result.thread.id || "");
-        updateSiteWorkspace(config, { activeThreadId });
-        res.json({ ok: true, workspace: { ...workspace, activeThreadId }, thread: summarizeCodexThread(result.thread), selection: result.selection, messages: [] });
+        const nextWorkspace = updateSiteWorkspace(config, { activeThreadId: undefined });
+        res.json({ ok: true, workspace: nextWorkspace, messages: [] });
     }));
     app.get("/agent/codex/threads/:threadId", route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);

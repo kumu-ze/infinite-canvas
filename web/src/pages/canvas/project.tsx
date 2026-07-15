@@ -246,6 +246,8 @@ function InfiniteCanvasPage() {
     const [searchParams] = useSearchParams();
     const projectId = params.id || "";
     const localAgentConnected = useAgentStore((state) => state.connected);
+    const localAgentUrl = useAgentStore((state) => state.url);
+    const localAgentToken = useAgentStore((state) => state.token);
     const localAgentActivity = useAgentStore((state) => state.activity);
     const localAgentEnabled = useAgentStore((state) => state.enabled);
     const agentPanelOpen = useAgentStore((state) => state.panelOpen);
@@ -1672,21 +1674,36 @@ function InfiniteCanvasPage() {
                 });
                 const blob = sourceBlob.type === "image/png" ? sourceBlob : await convertImageBlobToPng(sourceBlob);
                 if (window.isSecureContext && navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
-                    await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-                    message.success("图片已复制到剪贴板");
-                    return;
+                    try {
+                        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+                        message.success("图片已复制到剪贴板");
+                        return;
+                    } catch {
+                        // Continue with the local Agent or legacy selection fallback.
+                    }
+                }
+                let agentError: Error | null = null;
+                if (localAgentConnected && localAgentUrl && localAgentToken) {
+                    try {
+                        await copyImageBlobThroughAgent(blob, localAgentUrl, localAgentToken);
+                        message.success("图片已复制到剪贴板（本机 Agent）");
+                        return;
+                    } catch (error) {
+                        agentError = error instanceof Error ? error : new Error("本机 Agent 写入剪贴板失败");
+                    }
                 }
                 if (await copyImageBlobWithSelection(blob)) {
                     message.success("图片已复制到剪贴板（兼容模式）");
                     return;
                 }
+                if (agentError) throw agentError;
                 throw new Error("当前浏览器不允许在 HTTP 页面复制图片，请改用 HTTPS 访问");
             } catch (error) {
                 const reason = error instanceof Error ? error.message : "浏览器拒绝了剪贴板访问";
                 message.error(`复制图片失败：${reason}`);
             }
         },
-        [message],
+        [localAgentConnected, localAgentToken, localAgentUrl, message],
     );
 
     const saveNodeAsset = useCallback(
@@ -3500,6 +3517,17 @@ async function copyImageBlobWithSelection(blob: Blob) {
         container.remove();
         URL.revokeObjectURL(url);
     }
+}
+
+async function copyImageBlobThroughAgent(blob: Blob, endpoint: string, token: string) {
+    const response = await fetch(`${endpoint.replace(/\/$/, "")}/clipboard/image`, {
+        method: "POST",
+        headers: { "content-type": "image/png", "x-canvas-agent-token": token },
+        body: blob,
+    });
+    if (response.ok) return;
+    const result = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(result?.error || `本机 Agent 写入剪贴板失败 (${response.status})`);
 }
 
 function isAudioFile(file: File) {

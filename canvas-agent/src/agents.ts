@@ -70,8 +70,8 @@ export async function startCodexThread(emit: AgentEmit, cwd?: string, selection:
 export async function resumeCodexThread(emit: AgentEmit, threadId: string, cwd?: string) {
     codexApp ||= await CodexAppClient.start(emit);
     await loadCodexThread(emit, threadId, cwd, false);
-    const result = await codexApp.resumeThread(threadId, cwd);
-    assertThreadWorkspace(result.thread, cwd);
+    const result = await codexApp.resumeThread(threadId);
+    assertThreadWorkspaceIfPresent(result.thread, cwd);
     codexThreadId = String(field(result.thread, "id") || threadId);
     return { ...result, messages: threadMessages(result.thread) };
 }
@@ -123,10 +123,9 @@ async function ensureCodexThread(app: CodexAppClient, options: CodexRunOptions, 
     if (options.threadId) {
         if (options.threadId === codexThreadId) return codexThreadId;
         try {
-            const readResult = await app.readThread(options.threadId, false);
-            assertThreadWorkspace(field(readResult, "thread") || {}, options.cwd);
-            const resumeResult = await app.resumeThread(options.threadId, options.cwd);
-            assertThreadWorkspace(resumeResult.thread, options.cwd);
+            await loadCodexThread(emit, options.threadId, options.cwd, false);
+            const resumeResult = await app.resumeThread(options.threadId);
+            assertThreadWorkspaceIfPresent(resumeResult.thread, options.cwd);
             codexThreadId = String(field(resumeResult.thread, "id") || options.threadId);
             return codexThreadId;
         } catch (error) {
@@ -182,8 +181,8 @@ class CodexAppClient {
         return { thread: thread || {}, selection: codexSelection(result) };
     }
 
-    async resumeThread(threadId: string, cwd?: string): Promise<CodexThreadResult> {
-        const result = await this.request("thread/resume", { threadId, approvalPolicy: "never", sandbox: codexSandbox(cwd), config: codexConfig(), ...(cwd ? { cwd } : {}) });
+    async resumeThread(threadId: string): Promise<CodexThreadResult> {
+        const result = await this.request("thread/resume", { threadId });
         const thread = field(result, "thread") as Json | undefined;
         const id = String(field(thread, "id") || "");
         if (!id) throw new Error("Codex app-server 没有返回 thread id");
@@ -352,12 +351,25 @@ async function loadCodexThread(emit: AgentEmit, threadId: string, cwd: string | 
     codexApp ||= await CodexAppClient.start(emit);
     const result = await codexApp.readThread(threadId, includeTurns);
     const thread = field(result, "thread") || {};
-    assertThreadWorkspace(thread, cwd);
+    await assertCodexThreadWorkspace(codexApp, threadId, thread, cwd);
     return thread;
 }
 
-function assertThreadWorkspace(thread: unknown, cwd?: string) {
-    if (!cwd || threadInWorkspace(thread, cwd)) return;
+async function assertCodexThreadWorkspace(app: CodexAppClient, threadId: string, thread: unknown, cwd?: string) {
+    if (!cwd) return;
+    const threadCwd = String(field(thread, "cwd") || "");
+    if (threadCwd) {
+        if (threadInWorkspace(thread, cwd)) return;
+        throw new Error("该 Codex 会话不属于当前画布工作空间");
+    }
+    const result = await app.listThreads({ limit: 100, sortKey: "updated_at", sortDirection: "desc", sourceKinds: ["cli", "vscode", "appServer", "exec"], cwd });
+    const listedThread = arrayValue(field(result, "data")).find((item) => String(field(item, "id") || "") === threadId);
+    if (listedThread && threadInWorkspace(listedThread, cwd)) return;
+    throw new Error("该 Codex 会话不属于当前画布工作空间");
+}
+
+function assertThreadWorkspaceIfPresent(thread: unknown, cwd?: string) {
+    if (!cwd || !field(thread, "cwd") || threadInWorkspace(thread, cwd)) return;
     throw new Error("该 Codex 会话不属于当前画布工作空间");
 }
 

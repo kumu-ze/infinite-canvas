@@ -448,13 +448,11 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
         const effort = model ? models.find((item) => item.model === model)?.defaultReasoningEffort || "" : "";
         persistCodexSelection(model, effort);
         setAgentState({ selectedModel: model, selectedEffort: effort });
-        if (connected) void startNewThread({ model, effort });
     };
 
     const changeEffort = (effort: string) => {
         persistCodexSelection(selectedModel, effort);
         setAgentState({ selectedEffort: effort });
-        if (connected) void startNewThread({ model: selectedModel, effort });
     };
 
     const deleteThread = async (threadId: string) => {

@@ -8,9 +8,22 @@ type CanvasAgentToolResponse = { ok?: boolean; result?: unknown; error?: string 
 
 export async function startMcpServer() {
     const config = loadConfig(true);
+    await syncCurrentCodexThread(config);
     const server = new McpServer({ name: "canvas-agent", version: VERSION }, { instructions: AGENT_PROMPT });
     toolNames.forEach((name) => registerCanvasTool(server, config, name));
     await server.connect(new StdioServerTransport());
+}
+
+async function syncCurrentCodexThread(config: CanvasAgentConfig) {
+    try {
+        await fetch(`${config.url}/agent/codex/threads/sync`, {
+            method: "POST",
+            headers: { "x-canvas-agent-token": config.token },
+            signal: AbortSignal.timeout(2000),
+        });
+    } catch {
+        // The MCP server can still operate when the local HTTP Agent is started later.
+    }
 }
 
 function registerCanvasTool(server: McpServer, config: CanvasAgentConfig, name: ToolName) {

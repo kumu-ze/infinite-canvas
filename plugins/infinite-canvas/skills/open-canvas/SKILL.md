@@ -48,7 +48,7 @@ npx -y @kumuze/canvas-agent
 ## MCP 与连接地址
 
 插件在新的 Codex 任务中加载时会自动启动 `npx -y @kumuze/canvas-agent mcp`。这个 MCP 进程负责提供画布工具，不提供网页连接服务；
-上面启动的普通 Canvas Agent 负责提供 `Local URL` 和 `Connect token`。两个进程读取同一份本地配置，因此不需要用户手动填写地址或 token。
+上面启动的普通 Canvas Agent 负责提供 `Local URL` 和 `Connect token`。两个进程读取同一份本地配置；MCP 启动时还会让 Agent 面板自动绑定同工作区最近活动的 Codex 任务，因此不需要用户手动填写地址、token 或选择当前对话。
 
 ## 打开模式
 

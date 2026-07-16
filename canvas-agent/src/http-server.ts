@@ -57,6 +57,13 @@ export function startHttpServer() {
         const nextWorkspace = activeThreadId === workspace.activeThreadId ? workspace : updateSiteWorkspace(config, { activeThreadId });
         res.json({ ok: true, workspace: nextWorkspace, ...result });
     }));
+    app.post("/agent/codex/threads/sync", route(async (_req, res) => {
+        const workspace = ensureSiteWorkspace(config);
+        const result = await listCodexThreads(emit, { cwd: workspace.workspacePath });
+        const activeThreadId = result.data[0]?.id;
+        const nextWorkspace = updateSiteWorkspace(config, { activeThreadId });
+        res.json({ ok: true, workspace: nextWorkspace, thread: result.data[0] || null });
+    }));
     app.post("/agent/codex/threads/new", route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const nextWorkspace = updateSiteWorkspace(config, { activeThreadId: undefined });

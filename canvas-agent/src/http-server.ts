@@ -1,8 +1,8 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 
-import { DEFAULT_PORT, ensureSiteWorkspace, loadConfig, saveConfig, updateSiteWorkspace, type CanvasAgentConfig } from "./config.js";
+import { DEFAULT_PORT, ensureSiteWorkspace, loadConfig, saveConfig, selectSiteWorkspace, updateSiteWorkspace, type CanvasAgentConfig } from "./config.js";
 import { CanvasSession } from "./canvas-session.js";
-import { archiveCodexThread, interruptCodexTurn, listCodexModels, listCodexThreads, readCodexThread, resumeCodexThread, runClaudeTurn, runCodexTurn, startCodexThread, summarizeCodexThread, verifyCodexThreadWorkspace, withAgentPrompt, type CodexSelection } from "./agents.js";
+import { archiveCodexThread, interruptCodexTurn, listCodexModels, listCodexThreads, listCodexWorkspaces, readCodexThread, resumeCodexThread, runClaudeTurn, runCodexTurn, startCodexThread, summarizeCodexThread, verifyCodexThreadWorkspace, withAgentPrompt, type CodexSelection } from "./agents.js";
 import { copyPngToClipboard } from "./image-clipboard.js";
 import type { AgentAttachment } from "./types.js";
 
@@ -49,6 +49,14 @@ export function startHttpServer() {
         const workspace = ensureSiteWorkspace(config);
         res.json({ ok: true, workspace });
     });
+    app.get("/agent/codex/workspaces", route(async (_req, res) => {
+        const workspace = ensureSiteWorkspace(config);
+        res.json({ ok: true, workspace, ...(await listCodexWorkspaces(emit, workspace.workspacePath)) });
+    }));
+    app.post("/agent/codex/workspace", route(async (req, res) => {
+        const workspace = selectSiteWorkspace(config, String(req.body?.workspacePath || ""));
+        res.json({ ok: true, workspace });
+    }));
     app.get("/agent/codex/models", route(async (_req, res) => res.json({ ok: true, ...(await listCodexModels(emit)) })));
     app.get("/agent/codex/threads", route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);

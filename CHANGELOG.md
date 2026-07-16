@@ -7,6 +7,7 @@
 + [调整] Canvas Agent npm 包迁移至 `@kumuze/canvas-agent`，后续版本改用 GitHub OIDC Trusted Publishing 发布。
 + [修复] 画布在局域网 HTTP 页面复制图片时可通过已连接的 Windows 本机 Agent 写入系统剪贴板，避免浏览器兼容模式复制失效。
 + [新增] 本地 Agent 对话栏支持从 Codex 动态读取并切换模型与推理强度，切换后自动创建独立新对话。
++ [修复] 本地 Agent 切换模型、推理强度或新建对话后不再立即扫描尚未产生首轮消息的会话，避免选择状态被历史刷新覆盖及 Codex 状态库重复执行 rollout 路径读修复。
 + [修复] 本地 Agent 面板在局域网 HTTP 页面缺少 `crypto.randomUUID` 时使用安全回退，避免 NAS 部署页面崩溃。
 + [修复] 新建但尚未发送消息的 Codex 空对话不再触发历史读取错误。
 + [修复] 本地 Agent 在发送图片附件给 Codex 前统一解码并转成 PNG，避免 AVIF、HEIC 或伪扩展名图片触发无效图片错误。

@@ -418,7 +418,6 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
             const current = selection || { model: useAgentStore.getState().selectedModel, effort: useAgentStore.getState().selectedEffort };
             const data = await fetchAgentJson<AgentThreadResponse>(endpoint, token, "/agent/codex/threads/new", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(codexSelectionPayload(current.model, current.effort)) });
             setAgentState({ activeThreadId: data.thread?.id || data.workspace?.activeThreadId || "", messages: [], activeTab: "chat", activity: "新对话" });
-            await loadThreads();
         } catch (error) {
             addEventLog("新建对话失败", error);
             message.error(error instanceof Error ? error.message : "新建对话失败");

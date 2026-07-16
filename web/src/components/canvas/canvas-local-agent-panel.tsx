@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { App, AutoComplete, Button, Input, Segmented, Select, Tooltip } from "antd";
+import { App, AutoComplete, Button, Input, Segmented, Select, Switch, Tooltip } from "antd";
 import copyToClipboard from "copy-to-clipboard";
 import { Copy, FolderOpen, History, KeyRound, Link2, LoaderCircle, PlugZap, Plus, RefreshCw, Square, Terminal, Trash2 } from "lucide-react";
 
@@ -37,8 +37,9 @@ type AgentEventItem = { id?: string; type?: string; text?: unknown; message?: un
 type AgentLogContext = { endpoint: string; connected: boolean; enabled: boolean; activity: string; waiting: boolean; sending: boolean; messages: number; pendingTool?: string };
 type AgentWorkspace = { workspacePath: string; activeThreadId?: string };
 type AgentWorkspaceOption = { workspacePath: string; threadCount: number; updatedAt: number };
-type AgentThreadsResponse = { ok?: boolean; workspace?: AgentWorkspace; data?: AgentThreadSummary[] };
+type AgentThreadsResponse = { ok?: boolean; workspace?: AgentWorkspace; settings?: { followDesktopThread?: boolean }; data?: AgentThreadSummary[] };
 type AgentWorkspacesResponse = { ok?: boolean; workspace?: AgentWorkspace; data?: AgentWorkspaceOption[] };
+type AgentStatusResponse = { ok?: boolean; running?: boolean; queuedTurns?: number };
 type AgentSelection = { model?: string; effort?: string };
 type AgentThreadResponse = { ok?: boolean; workspace?: AgentWorkspace; thread?: AgentThreadSummary; selection?: AgentSelection; messages?: AgentChatItem[] };
 type AgentModelsResponse = { ok?: boolean; data?: AgentCodexModel[] };
@@ -61,6 +62,8 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
     const attachmentUrlsRef = useRef(new Set<string>());
     const clientIdRef = useRef(createId());
     const [workspaces, setWorkspaces] = useState<AgentWorkspaceOption[]>([]);
+    const [followDesktopThread, setFollowDesktopThread] = useState(false);
+    const [followDesktopThreadSupported, setFollowDesktopThreadSupported] = useState(false);
     const endpoint = useMemo(() => url.trim().replace(/\/$/, ""), [url]);
     const urlAgentAutoConnect = searchParams.has("agentUrl") && searchParams.has("agentToken");
     const loadThreads = useCallback(async () => {
@@ -69,16 +72,19 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
         try {
             const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/agent/codex/threads`);
             const nextThreadId = data.workspace?.activeThreadId || "";
+            let nextMessages: AgentChatItem[] = [];
+            if (nextThreadId && (data.data || []).some((thread) => thread.id === nextThreadId)) {
+                const thread = await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(nextThreadId)}`);
+                nextMessages = normalizeHistoryMessages(thread.messages || []);
+            }
             setAgentState({
                 threads: data.data || [],
                 workspacePath: data.workspace?.workspacePath || "",
                 activeThreadId: nextThreadId,
-                messages: [],
+                messages: nextMessages,
             });
-            if (nextThreadId && (data.data || []).some((thread) => thread.id === nextThreadId)) {
-                const thread = await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(nextThreadId)}`);
-                setAgentState({ messages: normalizeHistoryMessages(thread.messages || []) });
-            }
+            setFollowDesktopThread(Boolean(data.settings?.followDesktopThread));
+            setFollowDesktopThreadSupported(typeof data.settings?.followDesktopThread === "boolean");
         } catch (error) {
             addEventLog("读取历史失败", error);
         } finally {
@@ -103,6 +109,19 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
         } finally {
             setAgentState({ loadingModels: false });
         }
+    }, [endpoint, setAgentState, token]);
+
+    const refreshFollowedThread = useCallback(async () => {
+        if (!connectedRef.current && !useAgentStore.getState().connected) return;
+        const data = await fetchAgentJson<{ ok?: boolean; workspace?: AgentWorkspace }>(endpoint, token, "/agent/codex/workspace");
+        const nextThreadId = data.workspace?.activeThreadId || "";
+        if (!nextThreadId) return;
+        const thread = await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(nextThreadId)}`);
+        setAgentState({
+            workspacePath: data.workspace?.workspacePath || "",
+            activeThreadId: nextThreadId,
+            messages: normalizeHistoryMessages(thread.messages || []),
+        });
     }, [endpoint, setAgentState, token]);
 
     const loadWorkspaces = useCallback(async () => {
@@ -191,6 +210,31 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
         void loadThreads();
         void loadModels();
     }, [connected, loadModels, loadThreads]);
+
+    useEffect(() => {
+        if (!connected || !followDesktopThread) return;
+        const timer = setInterval(() => {
+            const state = useAgentStore.getState();
+            if (!state.loadingThreads && !state.sending && !state.waiting && !state.pendingTool) {
+                void refreshFollowedThread().catch(() => undefined);
+            }
+        }, 2500);
+        return () => clearInterval(timer);
+    }, [connected, followDesktopThread, refreshFollowedThread]);
+
+    useEffect(() => {
+        if (!connected || !waiting) return;
+        const timer = setInterval(() => {
+            void fetchAgentJson<AgentStatusResponse>(endpoint, token, "/agent/codex/status")
+                .then((status) => {
+                    if (status.running || Number(status.queuedTurns || 0) > 0) return;
+                    setAgentState({ activity: "完成", waiting: false, sending: false });
+                    void loadThreads();
+                })
+                .catch(() => undefined);
+        }, 3000);
+        return () => clearInterval(timer);
+    }, [connected, endpoint, loadThreads, setAgentState, token, waiting]);
 
     useEffect(() => {
         if (!connected) return;
@@ -488,6 +532,22 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
         }
     };
 
+    const changeFollowDesktopThread = async (enabled: boolean) => {
+        const previous = followDesktopThread;
+        setFollowDesktopThread(enabled);
+        try {
+            await fetchAgentJson(endpoint, token, "/agent/codex/settings", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ followDesktopThread: enabled }),
+            });
+        } catch (error) {
+            setFollowDesktopThread(previous);
+            addEventLog("更新自动跟随设置失败", error);
+            message.error(error instanceof Error ? error.message : "更新自动跟随设置失败");
+        }
+    };
+
     const changeEffort = (effort: string) => {
         persistCodexSelection(selectedModel, effort);
         setAgentState({ selectedEffort: effort });
@@ -612,10 +672,13 @@ export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { emb
                     activeThreadId={activeThreadId}
                     workspacePath={workspacePath}
                     workspaces={workspaces}
+                    followDesktopThread={followDesktopThread}
+                    followDesktopThreadSupported={followDesktopThreadSupported}
                     loading={loadingThreads}
                     connected={connected}
                     onRefresh={() => void loadThreads()}
                     onWorkspaceChange={(workspacePath) => void changeWorkspace(workspacePath)}
+                    onFollowDesktopThreadChange={(enabled) => void changeFollowDesktopThread(enabled)}
                     onNewThread={() => void startNewThread()}
                     onResumeThread={(threadId) => void resumeThread(threadId)}
                     onDeleteThread={confirmDeleteThread}
@@ -831,7 +894,7 @@ function AgentConnectView({ theme, url, token, enabled, connected, activity, con
     );
 }
 
-function AgentHistoryView({ theme, threads, activeThreadId, workspacePath, workspaces, loading, connected, onRefresh, onWorkspaceChange, onNewThread, onResumeThread, onDeleteThread }: { theme: (typeof canvasThemes)[keyof typeof canvasThemes]; threads: AgentThreadSummary[]; activeThreadId: string; workspacePath: string; workspaces: AgentWorkspaceOption[]; loading: boolean; connected: boolean; onRefresh: () => void; onWorkspaceChange: (workspacePath: string) => void; onNewThread: () => void; onResumeThread: (threadId: string) => void; onDeleteThread: (thread: AgentThreadSummary) => void }) {
+function AgentHistoryView({ theme, threads, activeThreadId, workspacePath, workspaces, followDesktopThread, followDesktopThreadSupported, loading, connected, onRefresh, onWorkspaceChange, onFollowDesktopThreadChange, onNewThread, onResumeThread, onDeleteThread }: { theme: (typeof canvasThemes)[keyof typeof canvasThemes]; threads: AgentThreadSummary[]; activeThreadId: string; workspacePath: string; workspaces: AgentWorkspaceOption[]; followDesktopThread: boolean; followDesktopThreadSupported: boolean; loading: boolean; connected: boolean; onRefresh: () => void; onWorkspaceChange: (workspacePath: string) => void; onFollowDesktopThreadChange: (enabled: boolean) => void; onNewThread: () => void; onResumeThread: (threadId: string) => void; onDeleteThread: (thread: AgentThreadSummary) => void }) {
     const [draftWorkspacePath, setDraftWorkspacePath] = useState(workspacePath);
     useEffect(() => setDraftWorkspacePath(workspacePath), [workspacePath]);
     const workspaceOptions = workspaces.map((workspace) => ({
@@ -846,9 +909,19 @@ function AgentHistoryView({ theme, threads, activeThreadId, workspacePath, works
         <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto p-3">
             <div className="space-y-3">
                 <div className="space-y-1.5">
-                    <div className="flex min-w-0 items-center gap-2 text-xs" style={{ color: theme.node.muted }}>
-                        <FolderOpen className="size-3.5 shrink-0" />
-                        <span>工作空间</span>
+                    <div className="flex min-w-0 items-center justify-between gap-2 text-xs" style={{ color: theme.node.muted }}>
+                        <div className="flex min-w-0 items-center gap-2">
+                            <FolderOpen className="size-3.5 shrink-0" />
+                            <span>工作空间</span>
+                        </div>
+                        {followDesktopThreadSupported ? (
+                            <Tooltip title="MCP 启动时切换到同工作空间最近活动的 Codex 对话">
+                                <div className="flex shrink-0 items-center gap-1.5">
+                                    <span>自动跟随</span>
+                                    <Switch size="small" checked={followDesktopThread} disabled={!connected || loading} onChange={onFollowDesktopThreadChange} />
+                                </div>
+                            </Tooltip>
+                        ) : null}
                     </div>
                     <div className="flex min-w-0 gap-2">
                         <AutoComplete

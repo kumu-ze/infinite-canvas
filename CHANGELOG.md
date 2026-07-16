@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-+ [修复] Infinite Canvas MCP 启动时自动把本地 Agent 面板绑定到同工作区最近活动的 Codex 任务，并同步升级内置 Codex CLI，避免桌面端与画布对话脱节。
++ [修复] 本地 Agent 保证只启动一个 Codex app-server，并在自动跟随时持续同步当前对话、丢失结束事件时自动释放等待状态。
++ [修复] Infinite Canvas MCP 默认不再覆盖本地 Agent 面板当前对话，并新增「自动跟随」开关按需同步同工作区最近活动的 Codex 对话。
 + [优化] 优化节点插件 SDK 及 HTML 节点插件交互。
 + [调整] Canvas Agent npm 包迁移至 `@kumuze/canvas-agent`，后续版本改用 GitHub OIDC Trusted Publishing 发布。
 + [修复] 画布在局域网 HTTP 页面复制图片时可通过已连接的 Windows 本机 Agent 写入系统剪贴板，避免浏览器兼容模式复制失效。

@@ -18,6 +18,8 @@ type AgentHistoryMessage = { id: string; role: "user" | "assistant" | "tool" | "
 
 let codexQueue: Promise<unknown> = Promise.resolve();
 let codexApp: CodexAppClient | null = null;
+let codexAppStarting: Promise<CodexAppClient> | null = null;
+let codexQueuedTurns = 0;
 let codexThreadId = "";
 const canvasAgentMcp = canvasAgentMcpCommand();
 const require = createRequire(import.meta.url);
@@ -28,8 +30,19 @@ export function withAgentPrompt(prompt: string) {
 
 export async function runCodexTurn(prompt: string, emit: AgentEmit, attachments: AgentAttachment[] = [], options: CodexRunOptions = {}) {
     if (!prompt.trim()) return;
-    codexQueue = codexQueue.catch(() => undefined).then(() => runCodexTurnNow(prompt, emit, attachments, options));
+    codexQueuedTurns += 1;
+    codexQueue = codexQueue.catch(() => undefined).then(async () => {
+        try {
+            await runCodexTurnNow(prompt, emit, attachments, options);
+        } finally {
+            codexQueuedTurns = Math.max(0, codexQueuedTurns - 1);
+        }
+    });
     await codexQueue;
+}
+
+export function codexTurnStatus() {
+    return { running: Boolean(codexApp?.hasActiveTurns()), queuedTurns: codexQueuedTurns };
 }
 
 export function interruptCodexTurn() {
@@ -42,16 +55,16 @@ async function runCodexTurnNow(prompt: string, emit: AgentEmit, attachments: Age
     try {
         files = await writeAttachmentFiles(attachments);
         const turnPrompt = withAttachmentPaths(prompt, files);
-        codexApp ||= await CodexAppClient.start(emit);
-        let threadId = await ensureCodexThread(codexApp, options, emit);
+        const app = await getCodexApp(emit);
+        let threadId = await ensureCodexThread(app, options, emit);
         try {
-            await codexApp.startTurn(threadId, turnPrompt, files, options);
+            await app.startTurn(threadId, turnPrompt, files, options);
         } catch (error) {
             if (!isRecoverableThreadError(error)) throw error;
             emit("agent_log", { text: `Codex thread unavailable, starting a new thread: ${errorMessage(error)}` });
             codexThreadId = "";
-            threadId = await ensureCodexThread(codexApp, { cwd: options.cwd }, emit);
-            await codexApp.startTurn(threadId, turnPrompt, files, options);
+            threadId = await ensureCodexThread(app, { cwd: options.cwd }, emit);
+            await app.startTurn(threadId, turnPrompt, files, options);
         }
     } catch (error) {
         emit("agent_error", { message: errorMessage(error) });
@@ -61,31 +74,31 @@ async function runCodexTurnNow(prompt: string, emit: AgentEmit, attachments: Age
 }
 
 export async function startCodexThread(emit: AgentEmit, cwd?: string, selection: CodexSelection = {}) {
-    codexApp ||= await CodexAppClient.start(emit);
-    const result = await codexApp.startThread({ cwd, ...selection });
+    const app = await getCodexApp(emit);
+    const result = await app.startThread({ cwd, ...selection });
     codexThreadId = String(field(result.thread, "id") || "");
     return result;
 }
 
 export async function resumeCodexThread(emit: AgentEmit, threadId: string, cwd?: string) {
-    codexApp ||= await CodexAppClient.start(emit);
+    const app = await getCodexApp(emit);
     await loadCodexThread(emit, threadId, cwd, false);
-    const result = await codexApp.resumeThread(threadId);
+    const result = await app.resumeThread(threadId);
     assertThreadWorkspaceIfPresent(result.thread, cwd);
     codexThreadId = String(field(result.thread, "id") || threadId);
     return { ...result, messages: threadMessages(result.thread) };
 }
 
 export async function listCodexModels(emit: AgentEmit) {
-    codexApp ||= await CodexAppClient.start(emit);
-    const result = await codexApp.listModels();
+    const app = await getCodexApp(emit);
+    const result = await app.listModels();
     const data = Array.isArray(field(result, "data")) ? (field(result, "data") as unknown[]).map(summarizeCodexModel).filter(Boolean) : [];
     return { data };
 }
 
 export async function listCodexThreads(emit: AgentEmit, options: { cwd: string; searchTerm?: string; limit?: number }) {
-    codexApp ||= await CodexAppClient.start(emit);
-    const result = await codexApp.listThreads({
+    const app = await getCodexApp(emit);
+    const result = await app.listThreads({
         limit: options.limit || 40,
         sortKey: "updated_at",
         sortDirection: "desc",
@@ -98,8 +111,8 @@ export async function listCodexThreads(emit: AgentEmit, options: { cwd: string; 
 }
 
 export async function listCodexWorkspaces(emit: AgentEmit, currentWorkspacePath: string) {
-    codexApp ||= await CodexAppClient.start(emit);
-    const result = await codexApp.listThreads({
+    const app = await getCodexApp(emit);
+    const result = await app.listThreads({
         limit: 100,
         sortKey: "updated_at",
         sortDirection: "desc",
@@ -136,9 +149,9 @@ export async function verifyCodexThreadWorkspace(emit: AgentEmit, threadId: stri
 }
 
 export async function archiveCodexThread(emit: AgentEmit, threadId: string, cwd?: string) {
-    codexApp ||= await CodexAppClient.start(emit);
+    const app = await getCodexApp(emit);
     await loadCodexThread(emit, threadId, cwd, false);
-    await codexApp.archiveThread(threadId);
+    await app.archiveThread(threadId);
 }
 
 export function runClaudeTurn(prompt: string, emit: AgentEmit) {
@@ -173,6 +186,19 @@ function isRecoverableThreadError(error: unknown) {
     return /thread not loaded|no rollout found/i.test(errorMessage(error));
 }
 
+async function getCodexApp(emit: AgentEmit) {
+    if (codexApp) return codexApp;
+    codexAppStarting ||= CodexAppClient.start(emit)
+        .then((app) => {
+            codexApp = app;
+            return app;
+        })
+        .finally(() => {
+            codexAppStarting = null;
+        });
+    return await codexAppStarting;
+}
+
 class CodexAppClient {
     private nextId = 1;
     private buffer = "";
@@ -185,6 +211,10 @@ class CodexAppClient {
 
     private constructor(private child: ChildProcess, private emit: AgentEmit) {}
 
+    hasActiveTurns() {
+        return this.activeTurns.size > 0;
+    }
+
     static async start(emit: AgentEmit) {
         const child = spawn(process.execPath, [codexBin(), "app-server", "--stdio"], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
         const client = new CodexAppClient(child, emit);
@@ -193,8 +223,10 @@ class CodexAppClient {
         child.on("error", (error) => emit("agent_error", { message: error.message }));
         child.on("exit", (code) => {
             client.failAll(`Codex app-server exited: ${code ?? 0}`);
-            codexApp = null;
-            codexThreadId = "";
+            if (codexApp === client) {
+                codexApp = null;
+                codexThreadId = "";
+            }
             emit("agent_log", { text: `Codex app-server exited: ${code ?? 0}` });
         });
         await client.request("initialize", { clientInfo: { name: "canvas-agent", title: "Infinite Canvas Agent", version: VERSION }, capabilities: { experimentalApi: true, requestAttestation: false } });
@@ -377,10 +409,10 @@ function normalizeCodexNotification(method: string, params: Json): AgentEvent | 
 }
 
 async function loadCodexThread(emit: AgentEmit, threadId: string, cwd: string | undefined, includeTurns: boolean) {
-    codexApp ||= await CodexAppClient.start(emit);
-    const result = await codexApp.readThread(threadId, includeTurns);
+    const app = await getCodexApp(emit);
+    const result = await app.readThread(threadId, includeTurns);
     const thread = field(result, "thread") || {};
-    await assertCodexThreadWorkspace(codexApp, threadId, thread, cwd);
+    await assertCodexThreadWorkspace(app, threadId, thread, cwd);
     return thread;
 }
 

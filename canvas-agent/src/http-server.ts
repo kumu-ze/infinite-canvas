@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 
 import { DEFAULT_PORT, ensureSiteWorkspace, loadConfig, saveConfig, selectSiteWorkspace, updateSiteWorkspace, type CanvasAgentConfig } from "./config.js";
 import { CanvasSession } from "./canvas-session.js";
-import { archiveCodexThread, interruptCodexTurn, listCodexModels, listCodexThreads, listCodexWorkspaces, readCodexThread, resumeCodexThread, runClaudeTurn, runCodexTurn, startCodexThread, summarizeCodexThread, verifyCodexThreadWorkspace, withAgentPrompt, type CodexSelection } from "./agents.js";
+import { archiveCodexThread, codexTurnStatus, interruptCodexTurn, listCodexModels, listCodexThreads, listCodexWorkspaces, readCodexThread, resumeCodexThread, runClaudeTurn, runCodexTurn, startCodexThread, summarizeCodexThread, verifyCodexThreadWorkspace, withAgentPrompt, type CodexSelection } from "./agents.js";
 import { copyPngToClipboard } from "./image-clipboard.js";
 import type { AgentAttachment } from "./types.js";
 
@@ -57,16 +57,27 @@ export function startHttpServer() {
         const workspace = selectSiteWorkspace(config, String(req.body?.workspacePath || ""));
         res.json({ ok: true, workspace });
     }));
+    app.post("/agent/codex/settings", route(async (req, res) => {
+        if (typeof req.body?.followDesktopThread !== "boolean") throw new Error("自动跟随设置无效");
+        config.followDesktopThread = req.body.followDesktopThread;
+        saveConfig(config);
+        res.json({ ok: true, settings: { followDesktopThread: config.followDesktopThread } });
+    }));
     app.get("/agent/codex/models", route(async (_req, res) => res.json({ ok: true, ...(await listCodexModels(emit)) })));
+    app.get("/agent/codex/status", (_req, res) => res.json({ ok: true, ...codexTurnStatus() }));
     app.get("/agent/codex/threads", route(async (req, res) => {
         const workspace = ensureSiteWorkspace(config);
         const result = await listCodexThreads(emit, { cwd: workspace.workspacePath, searchTerm: String(req.query.searchTerm || "") });
         const activeThreadId = result.data.some((thread) => thread.id === workspace.activeThreadId) ? workspace.activeThreadId : undefined;
         const nextWorkspace = activeThreadId === workspace.activeThreadId ? workspace : updateSiteWorkspace(config, { activeThreadId });
-        res.json({ ok: true, workspace: nextWorkspace, ...result });
+        res.json({ ok: true, workspace: nextWorkspace, settings: { followDesktopThread: Boolean(config.followDesktopThread) }, ...result });
     }));
     app.post("/agent/codex/threads/sync", route(async (_req, res) => {
         const workspace = ensureSiteWorkspace(config);
+        if (!config.followDesktopThread) {
+            res.json({ ok: true, skipped: true, workspace });
+            return;
+        }
         const result = await listCodexThreads(emit, { cwd: workspace.workspacePath });
         const activeThreadId = result.data[0]?.id;
         const nextWorkspace = updateSiteWorkspace(config, { activeThreadId });
